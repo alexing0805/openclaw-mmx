@@ -21,6 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   UPSTREAM_IMAGE: ghcr.io/openclaw/openclaw:latest
   TARGET_IMAGE: ghcr.io/${{ github.repository_owner }}/openclaw-mmx
   DIGEST_FILE: .github/upstream/openclaw.digest
@@ -32,10 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Read upstream digest
         id: digest
@@ -89,7 +90,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: steps.decide.outputs.needs_build == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -98,7 +99,7 @@ jobs:
       - name: Extract image metadata
         if: steps.decide.outputs.needs_build == 'true'
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.TARGET_IMAGE }}
           tags: |
@@ -114,7 +115,7 @@ jobs:
 
       - name: Build and push derived image
         if: steps.decide.outputs.needs_build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ env.DOCKERFILE }}
@@ -149,7 +150,7 @@ jobs:
 
       - name: Notify via GitHub issue
         if: steps.decide.outputs.needs_build == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           UPSTREAM_DIGEST: ${{ steps.digest.outputs.upstream_digest }}
           TARGET_IMAGE: ${{ env.TARGET_IMAGE }}
