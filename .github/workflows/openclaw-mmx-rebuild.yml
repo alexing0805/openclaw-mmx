@@ -1,0 +1,194 @@
+name: openclaw-mmx-rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Force rebuild even if upstream digest is unchanged
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 1 * * *'
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+
+concurrency:
+  group: openclaw-mmx-rebuild
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_IMAGE: ghcr.io/openclaw/openclaw:latest
+  TARGET_IMAGE: ghcr.io/${{ github.repository_owner }}/openclaw-mmx
+  DIGEST_FILE: .github/upstream/openclaw.digest
+  DOCKERFILE: docker/openclaw-mmx/Dockerfile
+  NOTIFY_USER: alexing0805
+
+jobs:
+  rebuild-if-updated:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Read upstream digest
+        id: digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIGEST="$(docker buildx imagetools inspect "$UPSTREAM_IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            DIGEST="$(docker buildx imagetools inspect "$UPSTREAM_IMAGE" | sed -n 's/^Digest:[[:space:]]*//p' | head -n1)"
+          fi
+          if [ -z "$DIGEST" ]; then
+            echo "Failed to resolve upstream digest for $UPSTREAM_IMAGE" >&2
+            exit 1
+          fi
+          echo "upstream_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "short_digest=${DIGEST#sha256:}" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream digest: $DIGEST"
+
+      - name: Read previous digest
+        id: previous
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$DIGEST_FILE" ]; then
+            PREV="$(tr -d '[:space:]' < "$DIGEST_FILE")"
+          else
+            PREV=""
+          fi
+          echo "previous_digest=$PREV" >> "$GITHUB_OUTPUT"
+          echo "Previous upstream digest: ${PREV:-<none>}"
+
+      - name: Decide whether rebuild is needed
+        id: decide
+        shell: bash
+        env:
+          FORCE_BUILD: ${{ github.event.inputs.force_build || 'false' }}
+        run: |
+          set -euo pipefail
+          NEEDS_BUILD=false
+          if [ "$FORCE_BUILD" = "true" ]; then
+            NEEDS_BUILD=true
+          elif [ "${{ steps.digest.outputs.upstream_digest }}" != "${{ steps.previous.outputs.previous_digest }}" ]; then
+            NEEDS_BUILD=true
+          fi
+          echo "needs_build=$NEEDS_BUILD" >> "$GITHUB_OUTPUT"
+          echo "needs_build=$NEEDS_BUILD"
+
+      - name: Stop early when no upstream update
+        if: steps.decide.outputs.needs_build != 'true'
+        run: echo "No upstream image update, skip rebuild."
+
+      - name: Log in to GitHub Container Registry
+        if: steps.decide.outputs.needs_build == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        if: steps.decide.outputs.needs_build == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.TARGET_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=upstream-${{ steps.digest.outputs.short_digest }}
+            type=raw,value={{date 'YYYYMMDD'}}
+          labels: |
+            org.opencontainers.image.title=openclaw-mmx
+            org.opencontainers.image.description=OpenClaw official image with mmx-cli preinstalled
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.base.name=${{ env.UPSTREAM_IMAGE }}
+            org.opencontainers.image.base.digest=${{ steps.digest.outputs.upstream_digest }}
+
+      - name: Build and push derived image
+        if: steps.decide.outputs.needs_build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ env.DOCKERFILE }}
+          push: true
+          pull: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Persist latest upstream digest
+        if: steps.decide.outputs.needs_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$DIGEST_FILE")"
+          printf '%s\n' '${{ steps.digest.outputs.upstream_digest }}' > "$DIGEST_FILE"
+
+      - name: Commit updated digest file
+        if: steps.decide.outputs.needs_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$DIGEST_FILE"
+          if git diff --cached --quiet; then
+            echo "No digest changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(actions): track upstream openclaw digest"
+          git push
+
+      - name: Notify via GitHub issue
+        if: steps.decide.outputs.needs_build == 'true'
+        uses: actions/github-script@v7
+        env:
+          UPSTREAM_DIGEST: ${{ steps.digest.outputs.upstream_digest }}
+          TARGET_IMAGE: ${{ env.TARGET_IMAGE }}
+          UPSTREAM_IMAGE: ${{ env.UPSTREAM_IMAGE }}
+          NOTIFY_USER: ${{ env.NOTIFY_USER }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const title = 'OpenClaw upstream updated, mmx image rebuilt';
+            const body = [
+              `@${process.env.NOTIFY_USER} 检测到上游 OpenClaw 官方镜像已更新，已自动完成重构。`,
+              '',
+              `- 上游镜像: \`${process.env.UPSTREAM_IMAGE}\``,
+              `- 上游摘要: \`${process.env.UPSTREAM_DIGEST}\``,
+              `- 派生镜像: \`${process.env.TARGET_IMAGE}:latest\``,
+              `- 工作流: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            const existing = issues.find(issue => issue.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body,
+              });
+            }
