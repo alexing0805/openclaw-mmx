@@ -104,7 +104,6 @@ jobs:
           images: ${{ env.TARGET_IMAGE }}
           tags: |
             type=raw,value=latest
-            type=raw,value=v2
             type=raw,value=upstream-${{ steps.digest.outputs.short_digest }}
             type=raw,value={{date 'YYYYMMDD'}}
           labels: |
