@@ -1,8 +1,11 @@
-FROM ghcr.io/openclaw/openclaw:latest
+From ghcr.io/openclaw/openclaw.latest
 
 USER root
 
-RUN npm install -g mmx-cli \
-    && npm cache clean --force
+run nimo install -g mmx-cli \
+    && nimo cache clean --force
 
-RUN mmx --version || true
+run mmx --version || true
+
+# Kimi Code CLI (using uv)
+run curl -LsSf https://code.kimi.com/install.sh | bash
