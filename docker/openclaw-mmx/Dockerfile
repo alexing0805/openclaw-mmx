@@ -10,3 +10,6 @@ RUN mmx --version || true
 # Kimi Code CLI (using uv)
 RUN export PATH="/root/.local/bin:$PATH" \
     && curl -LsSf https://code.kimi.com/install.sh | bash
+
+# Set PATH for kimi CLI at runtime
+ENV PATH="/root/.local/bin:$PATH"
